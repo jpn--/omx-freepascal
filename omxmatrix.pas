@@ -37,6 +37,7 @@ TOMXMatrix = class(TObject)
 
 public
     constructor Create();
+    constructor CreateNew(tables:Integer;  rows:Integer; cols:Integer; tableNames:array of string; fileName:string);
     destructor Destroy(); override;
 
     procedure openFile(fileName:string);
@@ -363,12 +364,25 @@ begin
     _nRows := 0;
     _nCols := 0;
     _memspace := -1;
-
+    
     _tableLookup:= TMapStringInt.Create();
     _dataset := TMapStringHID.Create();
     _dataspace := TMapStringHID.Create();
 
 end;
+
+
+constructor TOMXMatrix.CreateNew(tables:Integer;  rows:Integer; cols:Integer; tableNames:array of string; fileName:string);
+begin
+    _fileOpen := false;
+    _nTables := 0;
+    _nRows := 0;
+    _nCols := 0;
+    _memspace := -1;
+
+    createFile(tables,rows,cols,tableNames,fileName);
+end;
+
 
 destructor TOMXMatrix.Destroy();
 begin
@@ -392,7 +406,6 @@ var
 	shape:array[0..1] of Integer;
 	plist:hid_t;
 begin
-
     _fileOpen := true;
     _mode := MODE_CREATE;
 
@@ -411,28 +424,22 @@ begin
     shape[0] := rows;
     shape[1] := cols;
 
-
     // Write file attributes
     H5LTset_attribute_string(_h5file, '/', 'OMX_VERSION', '0.2');
-
     H5LTset_attribute_int(_h5file, '/', 'SHAPE', @(shape[0]), 2);
    
     // save the order that matrices are written
     plist := H5.H5Pcreate (H5.H5P_GROUP_CREATE);
     H5.H5Pset_link_creation_order(plist, H5P_CRT_ORDER_TRACKED);
-
    
     // Create folder structure
     H5.H5Gcreate2(_h5file, '/data', 0, plist, 0);
     H5.H5Gcreate2(_h5file, '/lookup', 0, plist, 0);
     
     H5.H5Pclose(plist);
-
-
     
     // Create the datasets
     init_tables(tableNames);
-
 end;
 
 procedure TOMXMatrix.writeRow( table:String;  row:Integer; rowptr:ptrDouble);
@@ -691,12 +698,10 @@ begin
 
     datagroup := H5.H5Gopen2(_h5file, '/data', H5P_DEFAULT);
 
-
     // if group has creation-order index, use it
     info := H5.H5Gget_create_plist(datagroup);
     H5.H5Pget_link_creation_order(info, @flags);
     H5.H5Pclose(info);
-
 
     p_leaf_info := @_leaf_info;
     if ((flags and H5P_CRT_ORDER_TRACKED) <> 0) then begin
@@ -704,10 +709,8 @@ begin
         H5.H5Literate(datagroup, H5_INDEX_CRT_ORDER, H5_ITER_INC, Phsize_t(0), p_leaf_info, @self);
     end else begin
     	// otherwise just use name order
-
     	H5.H5Literate(datagroup, H5_INDEX_NAME, H5_ITER_INC, Phsize_t(0), p_leaf_info, @self);
     end;
-
 
     H5.H5Gclose(datagroup);
 end;
@@ -794,5 +797,6 @@ end;
 
 
 begin
-  h5 := THDF5Dll.Create('C:\Program Files (x86)\HDF_Group\HDF5\1.10.1\bin\hdf5.dll');
+  h5 := THDF5Dll.Create('hdf5.dll');
 end.
+
