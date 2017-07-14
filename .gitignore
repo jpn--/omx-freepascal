@@ -23,3 +23,6 @@ nosetests.xml
 api/python/build
 omxmatrix.lps
 lib/i386-win32/
+*.bak
+omxmatrix.lpi
+omxmatrix.compiled
