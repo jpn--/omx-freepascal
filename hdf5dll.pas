@@ -1,5 +1,7 @@
 unit hdf5dll;
 
+{$MODE DELPHI}
+
 // Delphi wrapper for HDF5 library.
 
 // Auto-generated 2017-06-22 by hdf5pas.py.

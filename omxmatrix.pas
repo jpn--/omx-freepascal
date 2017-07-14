@@ -12,21 +12,25 @@
 unit omxmatrix;
 
 interface
-
+{$MACRO ON}
 {$DEFINE  MODE_READWRITE:= 0 }
 {$DEFINE  MODE_CREATE   := 1 }
 {$DEFINE  MAX_TABLES  := 500 }
 
 uses
-	fgl, hdf5dll;
+	fgl, hdf5dll, SysUtils;
 
 type
 
-PtrDouble = ^double;
-TMapStringInt = specialize TFPGMap<String,Integer>;
-TMapStringHID = specialize TFPGMap<String,hid_t>;
+  PtrDouble = ^double;
+  TMapStringInt = specialize TFPGMap<String,Integer>;
+  TMapStringHID = specialize TFPGMap<String,hid_t>;
 
-function isOMX(filename:string):Boolean;
+  FileOpenException = Class(Exception);
+  MatrixReadException = Class(Exception);
+  InvalidOperationException = Class(Exception);
+  OutOfMemoryException = Class(Exception);
+  NoSuchTableException = Class(Exception);
 
 
 TOMXMatrix = class(TObject)
@@ -42,24 +46,21 @@ public
     function  getRows(): Integer;
     function  getCols(): Integer;
     function  getTables(): Integer;
-    procedure getRow(table:string, row:Integer, rowptr:Pointer);  // throws InvalidOperationException, MatrixReadException
-    procedure getCol(table:string, col:Integer, colptr:Pointer);  // throws InvalidOperationException, MatrixReadException
+    procedure getRow(table:string; row:Integer; rowptr:Pointer);  // throws InvalidOperationException, MatrixReadException
+    procedure getCol(table:string; col:Integer; colptr:Pointer);  // throws InvalidOperationException, MatrixReadException
     function  getTableName(table:Integer): String;
 
     //Write/Create operations
-    procedure createFile(tables:Integer,  rows:Integer, cols:Integer, matNames:array of string, fileName:string);
-    procedure writeRow(table:string,  row:Integer, rowptr:PtrDouble);
+    procedure createFile(tables:Integer;  rows:Integer; cols:Integer; tableNames:array of string; fileName:string);
+    procedure writeRow(table:string;  row:Integer; rowptr:PtrDouble);
 
-    //Nested exception classes
-    class    FileOpenException { };
-    class    MatrixReadException { };
-    class    InvalidOperationException { };
-    class    OutOfMemoryException {};
-    class    NoSuchTableException {};
+
+
 
 //--------------------------------------------------------------------
-    //Data
 
+//Data
+public
     _h5file:hid_t;
     _nRows:Integer;
     _nCols:Integer;
@@ -67,7 +68,7 @@ public
     _mode:Integer;
     _fileOpen:Boolean;
 
-    _tableName:array[MAX_TABLES+1] of string;
+    _tableName:array[0..MAX_TABLES] of string;
     
     _tableLookup:TMapStringInt;
     _dataset:TMapStringHID;
@@ -79,50 +80,319 @@ private
 
     //Methods
     procedure readTableNames();
-    procedure printErrorCode(error:Integer);
+    //procedure printErrorCode(error:Integer);
     procedure init_tables (tableNames:array of string);
     function  openDataset(table:string):hid_t;  // throws InvalidOperationException
 
 end;
 
-
+function isOMX(filename:string):Boolean;
 
 
 implementation
 { the implementation is the code to execute the interface commands above }
+var {global}
+    h5:THDF5Dll;
+    //= THDF5Dll.Create('path/to/dll')  ;
 
 
-constructor TOMXMatrix.Create() 
+
+type
+    T_FindAttrFunc = function ( loc_id:hid_t; name:PChar; ainfo:PH5A_info_t;
+              op_data:Pointer):herr_t; CDecl;
+
+
+function find_attr( loc_id:hid_t; name:PChar; ainfo:PH5A_info_t;
+              op_data:Pointer):herr_t; CDecl;
+var
+  ret:Integer;
+begin
+
+    ret := H5_ITER_CONT;
+
+    //* Shut compiler up */
+    //loc_id := loc_id;
+    // ainfo := ainfo;
+
+    //* Define a positive value for return value if the attribute was found. This will
+    //* cause the iterator to immediately return that positive value,
+    //* indicating short-circuit success
+    //*/
+    if(strcomp(name, op_data) = 0) then
+        ret := H5_ITER_STOP;
+
+    result:= ret;
+end;
+
+
+
+
+
+
+
+function H5LT_find_attribute(  loc_id:hid_t; attr_name:PChar ):herr_t;
+var
+  find_attr_ptr : T_FindAttrFunc;
+begin
+    find_attr_ptr := @find_attr;
+    result:= H5.H5Aiterate2(loc_id, H5_INDEX_NAME, H5_ITER_INC, Phsize_t(0), find_attr_ptr, Pointer(attr_name));
+end;
+
+function H5LTset_attribute_string(  loc_id:hid_t;
+                                    obj_name, attr_name, attr_data:PChar):herr_t   ;
+var
+    attr_type:hid_t;
+    attr_space_id:hid_t;
+    attr_id:hid_t;
+    obj_id:hid_t;
+    has_attr:hid_t;
+    attr_size:hid_t;
+
+label
+  out;
+begin
+        //* Open the object */
+        obj_id := H5.H5Oopen(loc_id, obj_name, H5P_DEFAULT);
+        if (obj_id < 0) then begin
+            result := -1; exit;
+        end;
+
+
+        //* Create the attribute */
+        attr_type := H5.H5Tcopy( H5.H5T_C_S1 );
+        if ( (attr_type) < 0 ) then
+            goto out;
+
+        attr_size := strlen( attr_data ) + 1; //* extra null term */
+
+        if ( H5.H5Tset_size( attr_type, size_t(attr_size)) < 0 ) then
+            goto out;
+
+        if ( H5.H5Tset_strpad( attr_type, H5T_STR_NULLTERM ) < 0 ) then
+            goto out;
+        attr_space_id := H5.H5Screate( H5S_SCALAR );
+        if ( (attr_space_id) < 0 ) then
+            goto out;
+
+        //* Verify if the attribute already exists */
+        has_attr := H5LT_find_attribute(obj_id, attr_name);
+
+        //* The attribute already exists, delete it */
+        if(has_attr = 1) then
+            if(H5.H5Adelete(obj_id, attr_name) < 0) then
+                goto out;
+
+        //* Create and write the attribute */
+        attr_id := h5.H5Acreate2(obj_id, attr_name, attr_type, attr_space_id, H5P_DEFAULT, H5P_DEFAULT);
+        if(attr_id < 0) then
+            goto out;
+
+        if(H5.H5Awrite(attr_id, attr_type, attr_data) < 0) then
+            goto out;
+
+        if(H5.H5Aclose(attr_id) < 0) then
+            goto out;
+
+        if(H5.H5Sclose(attr_space_id) < 0) then
+            goto out;
+
+        if(H5.H5Tclose(attr_type) < 0) then
+            goto out;
+
+        //* Close the object */
+        if(h5.H5Oclose(obj_id) < 0) then begin
+            result := -1; exit;
+        end;
+
+        result := 0; exit;
+
+    out:
+
+        H5.H5Oclose(obj_id);
+        result := -1; exit;
+end;
+
+type PInteger = ^Integer;
+
+function H5LT_get_attribute_mem( loc_id:hid_t;
+                                         obj_name,
+                                         attr_name:PChar;
+                                          mem_type_id:hid_t;
+                                         data:Pointer) :herr_t;
+var
+  obj_id, attr_id: hid_t;
+label
+  out;
+begin
+        //* identifiers */
+        obj_id := -1;
+        attr_id:= -1;
+
+        //* Open the object */
+        obj_id := H5.H5Oopen(loc_id, obj_name, H5P_DEFAULT);
+        if((obj_id) < 0) then
+            goto out;
+        attr_id := H5.H5Aopen(obj_id, attr_name, H5P_DEFAULT);
+        if((attr_id) < 0) then
+            goto out;
+
+        if(H5.H5Aread(attr_id, mem_type_id, data) < 0) then
+            goto out;
+
+        if(H5.H5Aclose(attr_id) < 0) then
+            goto out;
+        attr_id := -1;
+
+        //* Close the object */
+        if(H5.H5Oclose(obj_id) < 0) then
+            goto out;
+        obj_id := -1;
+
+        result:= 0;
+        exit;
+
+    out:
+        if(attr_id > 0) then
+            H5.H5Aclose(attr_id);
+        result:= -1;
+
+end;
+
+
+
+function H5LTget_attribute_int(  loc_id:hid_t;
+                             obj_name:PChar;
+                             attr_name:PChar;
+                             data:PInteger ):herr_t;
+begin
+    //* Get the attribute */
+    if(H5LT_get_attribute_mem(loc_id, obj_name, attr_name, H5.H5T_NATIVE_INT, data) < 0) then begin
+        result:= -1;
+    end else begin ;
+        result:= 0;
+    end;
+end;
+
+function H5LT_set_attribute_numerical(  loc_id:hid_t;
+                                    obj_name:PChar;
+                                    attr_name:PChar;
+                                     size:size_t;
+                                     tid:hid_t;
+                                   data:Pointer ):herr_t;
+var
+    obj_id, sid, attr_id: hid_t;
+    dim_size:hsize_t;
+    has_attr:Integer;
+label
+  out;
+begin
+
+    dim_size:=size;
+
+
+    //* Open the object */
+    obj_id := H5.H5Oopen(loc_id, obj_name, H5P_DEFAULT);
+    if ((obj_id) < 0) then begin
+        result := -1;   exit;
+    end;
+
+    //* Create the data space for the attribute. */
+    sid := H5.H5Screate_simple( 1, @dim_size, Phsize_t(0) );
+    if ( sid < 0 ) then
+        goto out;
+
+    //* Verify if the attribute already exists */
+    has_attr := H5LT_find_attribute(obj_id, attr_name);
+
+    //* The attribute already exists, delete it */
+    if(has_attr = 1) then
+        if(H5.H5Adelete(obj_id, attr_name) < 0) then
+            goto out;
+
+    //* Create the attribute. */
+    attr_id :=H5. H5Acreate2(obj_id, attr_name, tid, sid, H5P_DEFAULT, H5P_DEFAULT);
+    if((attr_id) < 0) then
+        goto out;
+
+    //* Write the attribute data. */
+    if(H5.H5Awrite(attr_id, tid, data) < 0) then
+        goto out;
+
+    //* Close the attribute. */
+    if(H5.H5Aclose(attr_id) < 0) then
+        goto out;
+
+    //* Close the dataspace. */
+    if(H5.H5Sclose(sid) < 0) then
+        goto out;
+
+    //* Close the object */
+    if(H5.H5Oclose(obj_id) < 0) then begin
+        result := -1; exit;
+    end;
+
+    result := 0; exit;
+
+out:
+    H5.H5Oclose(obj_id);
+    result := -1; exit;
+end;
+
+
+
+function H5LTset_attribute_int(  loc_id:hid_t;
+                             obj_name:PChar;
+                             attr_name:PChar;
+                             data:PInteger;
+                              size:Size_t ):herr_t ;
+begin
+
+    if ( H5LT_set_attribute_numerical( loc_id, obj_name, attr_name, size,
+        H5.H5T_NATIVE_INT, data ) < 0 ) then begin
+        result:= -1;
+    end else begin
+        result:= 0;
+    end;
+end;
+
+
+constructor TOMXMatrix.Create(); 
 begin
     _fileOpen := false;
     _nTables := 0;
     _nRows := 0;
     _nCols := 0;
     _memspace := -1;
+
+    _tableLookup:= TMapStringInt.Create();
+    _dataset := TMapStringHID.Create();
+    _dataspace := TMapStringHID.Create();
+
 end;
 
-destructor TOMXMatrix.Destroy()
+destructor TOMXMatrix.Destroy();
 begin
     if (_memspace > -1 ) then begin
-        H5Sclose(_memspace);
-        _memspace = -1;
-    end
-
-    // Close H5 file handles
-    if (_fileOpen==true) then begin
-        H5Fclose(_h5file);
+        H5.H5Sclose(_memspace);
+        _memspace := -1;
     end;
 
-    _fileOpen = false;
+    // Close H5 file handles
+    if (_fileOpen=true) then begin
+        H5.H5Fclose(_h5file);
+    end;
+
+    _fileOpen := false;
 end;
 
 //Write/Create operations ---------------------------------------------------
 
-procedure TOMXMatrix.createFile( tables:Integer,  rows:Integer,  cols:Integer, tableNames:array of string,  fileName:String) 
+procedure TOMXMatrix.createFile( tables:Integer;  rows:Integer;  cols:Integer; tableNames:array of string;  fileName:String);
 var
 	shape:array[0..1] of Integer;
 	plist:hid_t;
 begin
+
     _fileOpen := true;
     _mode := MODE_CREATE;
 
@@ -131,81 +401,90 @@ begin
     _nTables := tables;
 
     // Create the physical file - H5F_ACC_TRUNC = overwrite an existing file
-    _h5file = H5Fcreate(fileName.c_str(), H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT);
-    if (0 > _h5file) {
-        fprintf(stderr, "ERROR: Could not create file %s.\n", fileName.c_str());
-    }
+    _h5file := H5.H5Fcreate(PChar(fileName), H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT);
+    if (0 > _h5file) then begin
+        writeln(stderr, 'ERROR: Could not create file ', fileName);
+    end;
+
 
     // Build SHAPE attribute
     shape[0] := rows;
     shape[1] := cols;
 
+
     // Write file attributes
-    H5LTset_attribute_string(_h5file, "/", "OMX_VERSION", "0.2");
-    H5LTset_attribute_int(_h5file, "/", "SHAPE", &shape[0], 2);
+    H5LTset_attribute_string(_h5file, '/', 'OMX_VERSION', '0.2');
+
+    H5LTset_attribute_int(_h5file, '/', 'SHAPE', @(shape[0]), 2);
    
     // save the order that matrices are written
-    plist := H5Pcreate (H5P_GROUP_CREATE);
-    H5Pset_link_creation_order(plist, H5P_CRT_ORDER_TRACKED);
+    plist := H5.H5Pcreate (H5.H5P_GROUP_CREATE);
+    H5.H5Pset_link_creation_order(plist, H5P_CRT_ORDER_TRACKED);
+
    
     // Create folder structure
-    H5Gcreate(_h5file, "/data", NULL, plist, NULL);
-    H5Gcreate(_h5file, "/lookup", NULL, plist, NULL);
+    H5.H5Gcreate2(_h5file, '/data', 0, plist, 0);
+    H5.H5Gcreate2(_h5file, '/lookup', 0, plist, 0);
     
-    H5Pclose(plist);
+    H5.H5Pclose(plist);
+
+
     
     // Create the datasets
     init_tables(tableNames);
+
 end;
 
-procedure TOMXMatrix.writeRow( table:String,  row:Integer, double *rowdata) 
+procedure TOMXMatrix.writeRow( table:String;  row:Integer; rowptr:ptrDouble);
+var
+   count, offset:array[0..1] of hsize_t;
 begin
 
 	// First see if we've opened this table already
-	if (_dataset.count(table) == 0) then begin
+	if (_dataset.IndexOf(table) < 0) then begin
 		// Does this table exist?
-		if (_tableLookup.count(table) == 0) then begin
-			throw NoSuchTableException();
+		if (_tableLookup.IndexOf(table) < 0) then begin
+			Raise NoSuchTableException.Create('no such table');
 		end;
-		_dataset[table] = openDataset(table);
+		_dataset[table] := openDataset(table);
 	end;
 
-    hsize_t count[2], offset[2];
 
-    count[0] = 1;
-    count[1] = _nCols;
 
-    offset[0] = row-1;
-    offset[1] = 0;
+    count[0] := 1;
+    count[1] := _nCols;
+
+    offset[0] := row-1;
+    offset[1] := 0;
 
     if (_memspace <0 ) then begin
-    	_memspace = H5Screate_simple(2,count,NULL);
+    	_memspace := H5.H5Screate_simple(2,count,Phsize_t(0));
     end;
 
-    if (_dataspace.count(table)==0) then begin
-        _dataspace[table] = H5Dget_space(_dataset[table]);
+    if (_dataspace.IndexOf(table)<0) then begin
+        _dataspace[table] := H5.H5Dget_space(_dataset[table]);
     end;
 
-    H5Sselect_hyperslab (_dataspace[table], H5S_SELECT_SET, offset, NULL, count, NULL);
+    H5.H5Sselect_hyperslab (_dataspace[table], H5S_SELECT_SET, offset, Phsize_t(0), count, Phsize_t(0));
 
-    if (0 > H5Dwrite(_dataset[table], H5T_NATIVE_DOUBLE, _memspace, _dataspace[table], H5P_DEFAULT, rowdata)) then begin
-        fprintf(stderr, "ERROR: writing table %s, row %d\n", table.c_str(), row);
-        exit(2);
+    if (0 > H5.H5Dwrite(_dataset[table], H5.H5T_NATIVE_DOUBLE, _memspace, _dataspace[table], H5P_DEFAULT, rowptr)) then begin
+        writeln(stderr, 'ERROR: writing table ',table,', row ', row);
+        exit;
     end;
 end;
 
 //Read/Open operations ------------------------------------------------------
 
-void OMXMatrix::openFile(string filename) 
+procedure TOMXMatrix.openFile( filename:string);
 var
 	shape:array[0..1] of Integer;
 	status:herr_t;
 begin
     // Try to open the existing file
-	_h5file = H5Fopen(filename.c_str(), H5F_ACC_RDWR, H5P_DEFAULT);
+    _h5file := H5.H5Fopen(PChar(filename), H5F_ACC_RDWR, H5P_DEFAULT);
     if (_h5file < 0) then begin
-        fprintf(stderr, "ERROR: Can't find or open file %s",filename.c_str());
-        exit(2);
+        writeln(stderr, 'ERROR: Cant find or open file ',filename);
+        exit;
     end;
 
     // OK, it's open and it's HDF5;
@@ -214,50 +493,50 @@ begin
 	_mode := MODE_READWRITE;
 
     status := 0;
-    status += H5LTget_attribute_int(_h5file, "/", "SHAPE", &shape[0]);
+    status += H5LTget_attribute_int(_h5file, '/', 'SHAPE', @(shape[0]));
     if (status < 0) then begin
-        fprintf(stderr, "ERROR: %s doesn't have SHAPE attribute\n", filename.c_str());
-        exit(2);
+        writeln(stderr, 'ERROR: ',filename,' doesnt have SHAPE attribute');
+        exit;
     end;
     _nRows := shape[0];
     _nCols := shape[1];
 
     readTableNames();
-end
-
-function TOMXMatrix.OMXMatrix::getRows():Integer 
-begin
-    return _nRows;
 end;
 
-function TOMXMatrix.OMXMatrix::getCols() :Integer
+function TOMXMatrix.getRows():Integer;
 begin
-    return _nCols;
+    result:= _nRows;
 end;
 
-function TOMXMatrix.OMXMatrix::getTables() :Integer
+function TOMXMatrix.getCols() :Integer;
 begin
-    return _nTables;
+    result:= _nCols;
 end;
 
-function TOMXMatrix.getTableName( table:Integer):String 
+function TOMXMatrix.getTables() :Integer;
 begin
-    return _tableName[table];
+    result:= _nTables;
 end;
 
-void OMXMatrix::getRow ( table:String,  row:Integer, rowptr:Pointer) 
+function TOMXMatrix.getTableName( table:Integer):String; 
+begin
+    result:= _tableName[table];
+end;
+
+procedure TOMXMatrix.getRow ( table:String;  row:Integer; rowptr:Pointer);
 var
 	data_count:array[0..1] of hsize_t;
 	data_offset:array[0..1] of hsize_t;
 begin
 
     // First see if we've opened this table already
-    if (_dataset.count(table)==0) then begin
+    if (_dataset.IndexOf(table)<0) then begin
         // Does this table exist?
-        if (_tableLookup.count(table)==0) then begin
-            throw MatrixReadException() ;
+        if (_tableLookup.IndexOf(table)<0) then begin
+            Raise MatrixReadException.Create('matrix read error') ;
         end;
-        _dataset[table] = openDataset(table);
+        _dataset[table] := openDataset(table);
     end;
 
     data_count[0] := 1;
@@ -266,44 +545,43 @@ begin
     data_offset[1] := 0;
 
     // Create dataspace if necessary.  Don't do every time or we'll run OOM.
-    if (_dataspace.count(table)==0) then begin
-        _dataspace[table] = H5Dget_space(_dataset[table]);
+    if (_dataspace.IndexOf(table)<0) then begin
+        _dataspace[table] :=H5. H5Dget_space(_dataset[table]);
     end;
 
     // Define MEMORY slab (using data_count since we don't want to read zones+1 values!)
     if (_memspace < 0) then begin
-        _memspace := H5Screate_simple(2, data_count, NULL);
+        _memspace := H5.H5Screate_simple(2, data_count, Phsize_t(0));
     end;
 
     // Define DATA slab
-    if (0 > H5Sselect_hyperslab (_dataspace[table], H5S_SELECT_SET, data_offset, NULL, data_count, NULL)) then begin
-        fprintf(stderr, "ERROR: Couldn't select DATA subregion for table %s, subrow %d.\n",
-                table.c_str(),row);
-        exit(2);
+    if (0 > H5.H5Sselect_hyperslab (_dataspace[table], H5S_SELECT_SET, data_offset, Phsize_t(0), data_count, Phsize_t(0))) then begin
+        writeln(stderr, 'ERROR: Couldnt select DATA subregion for table ',table,', subrow ',row);
+        exit;
     end;
 
     // Read the data!
-    if (0 > H5Dread(_dataset[table], H5T_NATIVE_DOUBLE, _memspace, _dataspace[table],
+    if (0 > H5.H5Dread(_dataset[table], H5.H5T_NATIVE_DOUBLE, _memspace, _dataspace[table],
             H5P_DEFAULT, rowptr)) then begin
-        fprintf(stderr, "ERROR: Couldn't read table %s, subrow %d.\n",table.c_str(),row);
-        exit(2);
+        writeln(stderr, 'ERROR: Couldnt read table ',table,', subrow ',row);
+        exit;
     end;
 end;
 
-procedure OMXMatrix.getCol( table:String,  col:Integer, colptr:Pointer) 
+procedure TOMXMatrix.getCol( table:String;  col:Integer; colptr:Pointer);
 var
 	data_count:array[0..1] of hsize_t;
 	data_offset:array[0..1] of hsize_t;
 begin
 
 	// First see if we've opened this table already
-	if (_dataset.count(table) == 0) then begin
+	if (_dataset.IndexOf(table) < 0) then begin
 		// Does this table exist?
-		if (_tableLookup.count(table) == 0) then begin
-			throw MatrixReadException();
+		if (_tableLookup.IndexOf(table) < 0) then begin
+			Raise MatrixReadException.Create('matrix read error');
 		end;
-		_dataset[table] = openDataset(table);
-	end
+		_dataset[table] := openDataset(table);
+	end;
 
 	data_count[0] := _nRows;
 	data_count[1] := 1;
@@ -311,176 +589,210 @@ begin
 	data_offset[1] := col - 1;
 
 	// Create dataspace if necessary.  Don't do every time or we'll run OOM.
-	if (_dataspace.count(table) == 0) then begin
-		_dataspace[table] = H5Dget_space(_dataset[table]);
+	if (_dataspace.IndexOf(table) < 0) then begin
+		_dataspace[table] := H5.H5Dget_space(_dataset[table]);
 	end;
 
 	// Define MEMORY slab (using data_count since we don't want to read zones+1 values!)
 	if (_memspace < 0) then begin
-		_memspace = H5Screate_simple(2, data_count, NULL);
+		_memspace := H5.H5Screate_simple(2, data_count, Phsize_t(0));
 	end;
 
 	// Define DATA slab
-	if (0 > H5Sselect_hyperslab(_dataspace[table], H5S_SELECT_SET, data_offset, NULL, data_count, NULL)) then begin
-		fprintf(stderr, "ERROR: Couldn't select DATA subregion for table %s, subcol %d.\n",
-			table.c_str(), col);
-		exit(2);
+	if (0 > H5.H5Sselect_hyperslab(_dataspace[table], H5S_SELECT_SET, data_offset, Phsize_t(0), data_count, Phsize_t(0))) then begin
+		writeln(stderr, 'ERROR: Couldnt select DATA subregion for table ',table,', subcol ',
+			col);
+		exit;
 	end;
 
 	// Read the data!
-	if (0 > H5Dread(_dataset[table], H5T_NATIVE_DOUBLE, _memspace, _dataspace[table],
+	if (0 > H5.H5Dread(_dataset[table], H5.H5T_NATIVE_DOUBLE, _memspace, _dataspace[table],
 		H5P_DEFAULT, colptr)) then begin
-		fprintf(stderr, "ERROR: Couldn't read table %s, subcol %d.\n", table.c_str(), col);
-		exit(2);
+		writeln(stderr, 'ERROR: Couldnt read table ',table,', subcol ', col);
+		exit;
 	end;
 end;
 
-procedure TOMXMatrix.closeFile() 
+procedure TOMXMatrix.closeFile();
+var
+        j:Integer;
 begin
-    for(map<string,hid_t>::iterator iterator = _dataset.begin(); iterator != _dataset.end(); iterator++) then begin
-        H5Dclose(iterator->second);
+    for j := 0 to _dataset.Count-1 do begin
+        H5.H5Dclose(_dataset.Data[J]);
     end;
 
-    for(map<string,hid_t>::iterator iterator = _dataspace.begin(); iterator != _dataspace.end(); iterator++) then begin
-        H5Sclose(iterator->second);
+    for j := 0 to _dataspace.Count-1 do begin
+        H5.H5Sclose(_dataspace.Data[J]);
     end;
 
     if (_memspace > -1 ) then begin
-        H5Sclose(_memspace);
-        _memspace = -1;
+        H5.H5Sclose(_memspace);
+        _memspace := -1;
     end;
 
-    if (_fileOpen==true) then begin
-        H5Fclose(_h5file);
+    if (_fileOpen=true) then begin
+        H5.H5Fclose(_h5file);
     end;
-    _fileOpen = false;
+    _fileOpen := false;
 end;
 
 // ---- Private functions ---------------------------------------------------
 
-hid_t OMXMatrix::openDataset(string table) 
+function TOMXMatrix.openDataset( table:string):hid_t;
+var
+        tname: string;
+        dataset: hid_t;
 begin
 
-    string tname = "/data/" + table;
+     tname := '/data/' + table;
     
-    hid_t dataset = H5Dopen(_h5file, tname.c_str(), H5P_DEFAULT);
-    if (dataset < 0) {
-        throw InvalidOperationException();
-    }
+     dataset := H5.H5Dopen2(_h5file, PChar(tname), H5P_DEFAULT);
+    if (dataset < 0) then
+        raise InvalidOperationException.Create('nope');
 
-    return dataset;
+
+    result:= dataset;
 end;
 
 //
 // Group traversal function. Build list of tablenames from this.
-// 
-herr_t _leaf_info(hid_t loc_id, const char *name, const H5L_info_t *info, void *opdata)
-begin
-    OMXMatrix *m = (OMXMatrix *) opdata;
+//
 
-    m->_nTables++;
-    m->_tableName[m->_nTables] = name;
-    m->_tableLookup[name] = m->_nTables;
-    return 0;
+type POMXMatrix = ^TOMXMatrix;
+
+type T_LeafInfoFunc = function ( loc_id:hid_t;name:PChar; info:PH5L_info_t; opdata:Pointer):herr_t; CDecl;
+
+
+function _leaf_info( loc_id:hid_t;name:PChar; info:PH5L_info_t; opdata:Pointer) : herr_t;  CDecl;
+var
+        m : TOMXMatrix;
+begin
+    m := POMXMatrix(opdata)^;
+    m._nTables := m._nTables +1;
+    m._tableName[m._nTables] := name;
+    m._tableLookup[name] := m._nTables;
+    result:= 0;
 end;
 
 // Read table names.  Sets number of tables in file, too. 
-procedure TOMXMatrix.readTableNames() 
+procedure TOMXMatrix.readTableNames(); 
 var
 	datagroup:hid_t;
 	info:hid_t;
+        flags:Integer;
+        p_leaf_info: T_LeafInfoFunc;
 begin
 
     _nTables := 0;
     _tableLookup.clear();
     _dataset.clear();
     _dataspace.clear();
-    unsigned flags = 0;
+    flags := 0;
 
-    datagroup := H5Gopen(_h5file, "/data", H5P_DEFAULT);
+    datagroup := H5.H5Gopen2(_h5file, '/data', H5P_DEFAULT);
+
 
     // if group has creation-order index, use it
-    info := H5Gget_create_plist(datagroup);
-    H5Pget_link_creation_order(info, &flags);
-    H5Pclose(info);
+    info := H5.H5Gget_create_plist(datagroup);
+    H5.H5Pget_link_creation_order(info, @flags);
+    H5.H5Pclose(info);
 
-    if (flags & H5P_CRT_ORDER_TRACKED) then begin
+
+    p_leaf_info := @_leaf_info;
+    if ((flags and H5P_CRT_ORDER_TRACKED) <> 0) then begin
     	// Call _leaf_info() for every child in /data:
-        H5Literate(datagroup, H5_INDEX_CRT_ORDER, H5_ITER_INC, NULL, _leaf_info, this);
+        H5.H5Literate(datagroup, H5_INDEX_CRT_ORDER, H5_ITER_INC, Phsize_t(0), p_leaf_info, @self);
     end else begin
     	// otherwise just use name order
-    	H5Literate(datagroup, H5_INDEX_NAME, H5_ITER_INC, NULL, _leaf_info, this);
+
+    	H5.H5Literate(datagroup, H5_INDEX_NAME, H5_ITER_INC, Phsize_t(0), p_leaf_info, @self);
     end;
 
-    H5Gclose(datagroup);
+
+    H5.H5Gclose(datagroup);
 end;
 
 
 
-void OMXMatrix::init_tables (tableNames:array of string) 
+procedure TOMXMatrix.init_tables (tableNames:array of string);
+var
+    dims       :array[0..1] of hsize_t ;
+    plist      :hid_t   ;
+    rtn        :herr_t  ;
+    chunksize  :array[0..1] of hsize_t ;
+    fillvalue  :array[0..0] of double  ;
+    dataspace  :hid_t;
+    t:Integer;
+    tpath, tname: String;
 begin
 
-    hsize_t     dims[2]={_nRows,_nCols};
-    hid_t       plist;
-    herr_t      rtn;
-    hsize_t     chunksize[2];
-    double      fillvalue[1];
+    dims[0] := _nRows;
+    dims[1] := _nCols;
 
-    fillvalue[0] = 0.0;
-    chunksize[0] = 1;
-    chunksize[1] = _nCols;
+    fillvalue[0] := 0.0;
+    chunksize[0] := 1;
+    chunksize[1] := _nCols;
 
-    hid_t   dataspace = H5Screate_simple(2,dims, NULL);
+    dataspace := H5.H5Screate_simple(2,dims, Phsize_t(0));
 
     // Use a row-chunked, zip-compressed data format:
-    plist = H5Pcreate(H5P_DATASET_CREATE);
-    rtn = H5Pset_chunk(plist, 2, chunksize);
-    rtn = H5Pset_deflate(plist, 7);
-    rtn = H5Pset_fill_value(plist, H5T_NATIVE_DOUBLE, &fillvalue);
+    plist := H5.H5Pcreate(H5.H5P_DATASET_CREATE);
+    rtn := H5.H5Pset_chunk(plist, 2, chunksize);
+    rtn := H5.H5Pset_deflate(plist, 7);
+    rtn := H5.H5Pset_fill_value(plist, H5.H5T_NATIVE_DOUBLE, @fillvalue);
 
     // Loop on all tables
-    for (unsigned int t=0; t<tableNames.size(); t++) then begin
-        string tpath = "/data/" + tableNames[t];
-        string tname(tableNames[t]);
+    for t := 0 to Length(tableNames)-1 do begin
+        tpath := '/data/' + tableNames[t];
+        tname := tableNames[t];
         
         // Create a dataset for each table
-        _dataset[tname] = H5Dcreate2(_h5file, tpath.c_str(), H5T_NATIVE_DOUBLE,
+        _dataset[tname] := H5.H5Dcreate2(_h5file, PChar(tpath), H5.H5T_NATIVE_DOUBLE,
                                  dataspace, H5P_DEFAULT, plist, H5P_DEFAULT);
         if (_dataset[tname]<0) then begin
-            fprintf(stderr, "Error creating dataset %s",tpath.c_str());
-            exit(2);
+            writeln(stderr, 'Error creating dataset ',tpath);
+            exit;
         end;
         
         // Save the something somewhere
-        _tableLookup[tname] = t+1;
+        _tableLookup[tname] := t+1;
     end;
 
-    rtn = H5Pclose(plist);
-    rtn = H5Sclose(dataspace);
+    rtn := H5.H5Pclose(plist);
+    rtn := H5.H5Sclose(dataspace);
 end;
 
-function isOMX(filename:string):Boolean
+function isOMX(filename:string):Boolean;
 var
 	answer:htri_t;
 	f:hid_t;
 	exists:herr_t;
 begin
-	answer = H5Fis_hdf5(filename);
-	if (answer <= 0) then return false;
+	answer := H5.H5Fis_hdf5(PChar(filename));
+	if (answer <= 0) then begin
+           result:= false;
+           exit;
+        end;
 
 	// It's HDF5; is it OMX?
-	f := H5Fopen(filename, H5F_ACC_RDONLY, H5P_DEFAULT);
-	exists := H5LTfind_attribute(f, "OMX_VERSION");
+	f := H5.H5Fopen(PChar(filename), H5F_ACC_RDONLY, H5P_DEFAULT);
+	exists := H5LT_find_attribute(f, 'OMX_VERSION');
 
 	//don't actually care what OMX version it is, yet...
 	//char version[255];
 	//int status = H5LTget_attribute_string(f,"/","OMX_VERSION", version);
-	H5Fclose(f);
+	H5.H5Fclose(f);
 
-	if (exists == 0)  then begin
-		fprintf(stderr, "\n** %s is HDF5, but is not a valid OMX file.\n", filename);
-		exit(2);
+	if (exists = 0)  then begin
+		writeln(stderr, '\n** ',filename,' is HDF5, but is not a valid OMX file.' );
+		exit;
 	end;
 
-	return true;
+	result:= true;
 end;
+
+
+
+begin
+  h5 := THDF5Dll.Create('C:\Program Files (x86)\HDF_Group\HDF5\1.10.1\bin\hdf5.dll');
+end.
