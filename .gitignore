@@ -22,3 +22,4 @@ nosetests.xml
 # Python build directory
 api/python/build
 omxmatrix.lps
+lib/i386-win32/
