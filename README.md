@@ -1,34 +1,58 @@
 
-The C++ API does more than the simple example below.  Refer to the header file 
-for more information.
+The Free Pascal API does more than the simple example below, although not a lot more.  
+Refer to the source code for more information.
 
 ```
-#include "omxmatrix.h"
+program OMX_Example;
 
-#define MAXZONES 3000
+uses omxmatrix;
 
-/* declarations */
-OMXMatrix *omxMfs;
-double omxDataBuffer[MAXZONES + 1]; //OMX is doubles
-char* omxMfsFileName = "mfs.omx";
+{$MACRO ON}
+{$DEFINE MAXZONES:= 1000}
 
-/* open omx file as read/write */
-omxMfs = new OMXMatrix();
-if (isOMX(omxMfsFileName)) {
-  omxMfs->openFile(omxMfsFileName);
-} else {
-  printf("error: cannot open OMX mfs file.\n");
-}
+var
+  omxMfsFileName:String;
+  omxMfs:TOMXMatrix;
+  omxDataBuffer:array[0..MAXZONES+1] of Double;    //OMX is doubles
+  i,zones:Integer;
+  tableNames:array[1..3] of string;
 
-/* initialize omx data buffer */
-for (i = 0; i <= MAXZONES + 1; i++) {
-  omxDataBuffer[i] = 0.0;
-}
+begin
 
-/* get number of zones */
-int zones = omxMfs->getRows();
+  omxMfsFileName := 'C:\tmp\omx-test\examp.omx';
 
-/* read and write row 2 */
-omxMfs->getRow("mf1", 2, &omxDataBuffer);
-omxMfs->writeRow("mf1", 2, omxDataBuffer);
+  tableNames[1] := 'First';
+  tableNames[2] := 'Second';
+  tableNames[3] := 'Third';
+
+  //* open omx file as read/write */
+  writeln('Creating file ',omxMfsFileName);
+  omxMfs := TOMXMatrix.Create();
+  omxMfs.createFile(3, 700, 700, tableNames, omxMfsFileName);
+
+  //* initialize omx data buffer */
+  writeln('initialize omx data buffer ',MAXZONES);
+  for i := 0 to MAXZONES + 1 do begin
+    omxDataBuffer[i] := 0.0;
+  end;
+
+  //* get number of zones */
+  zones := omxMfs.getRows();
+  writeln('get number of zones = ',zones);
+
+  //* read and write row 2 */
+  omxMfs.getRow('First', 2, @(omxDataBuffer[0]));
+
+  //* write some junk data in the buffer */
+  for i := 0 to 16 do begin
+    omxDataBuffer[i] := i*101.0;
+    writeln(i,' is ',omxDataBuffer[i]);
+  end;
+
+  omxMfs.writeRow('First', 2, omxDataBuffer);
+
+  omxMfs.closeFile();
+
+  writeln('Finished OMX_Example.');
+end.
 ```
