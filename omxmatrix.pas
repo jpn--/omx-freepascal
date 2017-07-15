@@ -1,13 +1,13 @@
 //  omxmatrix.pas
-// 
+//
 //  OMX/HDF5 Matrix helper routines
-// 
+//
 //  @author Jeff Newman, Cambridge Systematics
-//  
+//
 //  Based on the c++ version, by
 //  @author Billy Charlton, PSRC
 //  @author Ben Stabler, RSG
-// 
+//
 
 unit omxmatrix;
 
@@ -23,6 +23,7 @@ uses
 type
 
   PtrDouble = ^double;
+  PtrFloat = ^single;
   TMapStringInt = specialize TFPGMap<String,Integer>;
   TMapStringHID = specialize TFPGMap<String,hid_t>;
 
@@ -37,7 +38,7 @@ TOMXMatrix = class(TObject)
 
 public
     constructor Create();
-    constructor CreateNew(tables:Integer;  rows:Integer; cols:Integer; tableNames:array of string; fileName:string);
+    constructor CreateNew(tables:Integer;  rows:Integer; cols:Integer; tableNames:array of string; fileName:string; std_type:Integer);
     destructor Destroy(); override;
 
     procedure openFile(fileName:string);
@@ -53,7 +54,7 @@ public
 
     //Write/Create operations
     procedure createFile(tables:Integer;  rows:Integer; cols:Integer; tableNames:array of string; fileName:string);
-    procedure writeRow(table:string;  row:Integer; rowptr:PtrDouble);
+    procedure writeRow(table:string;  row:Integer; rowptr:Pointer);
 
 
 
@@ -69,12 +70,17 @@ public
     _mode:Integer;
     _fileOpen:Boolean;
 
-    _tableName:array[0..MAX_TABLES] of string;
-    
+    _tableName:array[1..MAX_TABLES] of string;
+
     _tableLookup:TMapStringInt;
     _dataset:TMapStringHID;
     _dataspace:TMapStringHID;
 
+    _dataset_count:Integer;
+    _dataspace_count:Integer;
+
+    _std_dtype:hid_t;
+    std_dtype:Integer;
 private
 
 	_memspace:hid_t;
@@ -357,28 +363,48 @@ begin
 end;
 
 
-constructor TOMXMatrix.Create(); 
+constructor TOMXMatrix.Create();
 begin
     _fileOpen := false;
     _nTables := 0;
     _nRows := 0;
     _nCols := 0;
     _memspace := -1;
-    
+
     _tableLookup:= TMapStringInt.Create();
     _dataset := TMapStringHID.Create();
     _dataspace := TMapStringHID.Create();
 
+    _dataset_count := 0;
+    _dataspace_count := 0;
+
+    _std_dtype := H5.H5T_NATIVE_DOUBLE;
+    std_dtype := 64;
+
 end;
 
 
-constructor TOMXMatrix.CreateNew(tables:Integer;  rows:Integer; cols:Integer; tableNames:array of string; fileName:string);
+constructor TOMXMatrix.CreateNew(tables:Integer;  rows:Integer; cols:Integer; tableNames:array of string; fileName:string; std_type:Integer);
 begin
     _fileOpen := false;
     _nTables := 0;
     _nRows := 0;
     _nCols := 0;
     _memspace := -1;
+
+    _tableLookup:= TMapStringInt.Create();
+    _dataset := TMapStringHID.Create();
+    _dataspace := TMapStringHID.Create();
+
+    _dataset_count := 0;
+    _dataspace_count := 0;
+
+    _std_dtype := H5.H5T_NATIVE_DOUBLE;
+    std_dtype := 64;
+    if (std_type=32) then begin
+       _std_dtype := H5.H5T_NATIVE_FLOAT;
+       std_dtype := 32;
+    end;
 
     createFile(tables,rows,cols,tableNames,fileName);
 end;
@@ -427,22 +453,22 @@ begin
     // Write file attributes
     H5LTset_attribute_string(_h5file, '/', 'OMX_VERSION', '0.2');
     H5LTset_attribute_int(_h5file, '/', 'SHAPE', @(shape[0]), 2);
-   
+
     // save the order that matrices are written
     plist := H5.H5Pcreate (H5.H5P_GROUP_CREATE);
     H5.H5Pset_link_creation_order(plist, H5P_CRT_ORDER_TRACKED);
-   
+
     // Create folder structure
     H5.H5Gcreate2(_h5file, '/data', 0, plist, 0);
     H5.H5Gcreate2(_h5file, '/lookup', 0, plist, 0);
-    
+
     H5.H5Pclose(plist);
-    
+
     // Create the datasets
     init_tables(tableNames);
 end;
 
-procedure TOMXMatrix.writeRow( table:String;  row:Integer; rowptr:ptrDouble);
+procedure TOMXMatrix.writeRow( table:String;  row:Integer; rowptr:Pointer);
 var
    count, offset:array[0..1] of hsize_t;
 begin
@@ -451,9 +477,10 @@ begin
 	if (_dataset.IndexOf(table) < 0) then begin
 		// Does this table exist?
 		if (_tableLookup.IndexOf(table) < 0) then begin
-			Raise NoSuchTableException.Create('no such table');
+			Raise NoSuchTableException.Create(table);
 		end;
 		_dataset[table] := openDataset(table);
+                Inc(_dataset_count);
 	end;
 
 
@@ -470,14 +497,18 @@ begin
 
     if (_dataspace.IndexOf(table)<0) then begin
         _dataspace[table] := H5.H5Dget_space(_dataset[table]);
+        Inc(_dataspace_count);
     end;
 
     H5.H5Sselect_hyperslab (_dataspace[table], H5S_SELECT_SET, offset, Phsize_t(0), count, Phsize_t(0));
 
-    if (0 > H5.H5Dwrite(_dataset[table], H5.H5T_NATIVE_DOUBLE, _memspace, _dataspace[table], H5P_DEFAULT, rowptr)) then begin
+    if (0 > H5.H5Dwrite(_dataset[table], _std_dtype, _memspace, _dataspace[table], H5P_DEFAULT, rowptr)) then begin
         writeln(stderr, 'ERROR: writing table ',table,', row ', row);
         exit;
     end;
+
+
+
 end;
 
 //Read/Open operations ------------------------------------------------------
@@ -526,7 +557,7 @@ begin
     result:= _nTables;
 end;
 
-function TOMXMatrix.getTableName( table:Integer):String; 
+function TOMXMatrix.getTableName( table:Integer):String;
 begin
     result:= _tableName[table];
 end;
@@ -544,6 +575,7 @@ begin
             Raise MatrixReadException.Create('matrix read error') ;
         end;
         _dataset[table] := openDataset(table);
+        Inc(_dataset_count);
     end;
 
     data_count[0] := 1;
@@ -554,6 +586,7 @@ begin
     // Create dataspace if necessary.  Don't do every time or we'll run OOM.
     if (_dataspace.IndexOf(table)<0) then begin
         _dataspace[table] :=H5. H5Dget_space(_dataset[table]);
+        Inc(_dataspace_count);
     end;
 
     // Define MEMORY slab (using data_count since we don't want to read zones+1 values!)
@@ -568,7 +601,7 @@ begin
     end;
 
     // Read the data!
-    if (0 > H5.H5Dread(_dataset[table], H5.H5T_NATIVE_DOUBLE, _memspace, _dataspace[table],
+    if (0 > H5.H5Dread(_dataset[table], _std_dtype, _memspace, _dataspace[table],
             H5P_DEFAULT, rowptr)) then begin
         writeln(stderr, 'ERROR: Couldnt read table ',table,', subrow ',row);
         exit;
@@ -588,6 +621,7 @@ begin
 			Raise MatrixReadException.Create('matrix read error');
 		end;
 		_dataset[table] := openDataset(table);
+                Inc(_dataset_count);
 	end;
 
 	data_count[0] := _nRows;
@@ -598,6 +632,7 @@ begin
 	// Create dataspace if necessary.  Don't do every time or we'll run OOM.
 	if (_dataspace.IndexOf(table) < 0) then begin
 		_dataspace[table] := H5.H5Dget_space(_dataset[table]);
+                Inc(_dataspace_count);
 	end;
 
 	// Define MEMORY slab (using data_count since we don't want to read zones+1 values!)
@@ -613,31 +648,36 @@ begin
 	end;
 
 	// Read the data!
-	if (0 > H5.H5Dread(_dataset[table], H5.H5T_NATIVE_DOUBLE, _memspace, _dataspace[table],
+	if (0 > H5.H5Dread(_dataset[table], _std_dtype, _memspace, _dataspace[table],
 		H5P_DEFAULT, colptr)) then begin
 		writeln(stderr, 'ERROR: Couldnt read table ',table,', subcol ', col);
 		exit;
 	end;
 end;
 
-procedure TOMXMatrix.closeFile();
+procedure TOMXMatrix.closeFile;
 var
         j:Integer;
 begin
-    for j := 0 to _dataset.Count-1 do begin
-        H5.H5Dclose(_dataset.Data[J]);
-    end;
+     if (_fileOpen=true) then begin
+         if (_dataset_Count > 0) then begin
+          for j := 0 to _dataset_Count-1 do begin
+              H5.H5Dclose(_dataset.Data[J]);
+          end;
+        end;
 
-    for j := 0 to _dataspace.Count-1 do begin
-        H5.H5Sclose(_dataspace.Data[J]);
-    end;
+        if (_dataspace_Count > 0) then begin
+          for j := 0 to _dataspace_Count-1 do begin
+              H5.H5Sclose(_dataspace.Data[J]);
+          end;
+        end;
 
-    if (_memspace > -1 ) then begin
-        H5.H5Sclose(_memspace);
-        _memspace := -1;
-    end;
+        if (_memspace > -1 ) then begin
+            H5.H5Sclose(_memspace);
+            _memspace := -1;
+        end;
 
-    if (_fileOpen=true) then begin
+
         H5.H5Fclose(_h5file);
     end;
     _fileOpen := false;
@@ -652,7 +692,7 @@ var
 begin
 
      tname := '/data/' + table;
-    
+
      dataset := H5.H5Dopen2(_h5file, PChar(tname), H5P_DEFAULT);
     if (dataset < 0) then
         raise InvalidOperationException.Create('nope');
@@ -681,8 +721,8 @@ begin
     result:= 0;
 end;
 
-// Read table names.  Sets number of tables in file, too. 
-procedure TOMXMatrix.readTableNames(); 
+// Read table names.  Sets number of tables in file, too.
+procedure TOMXMatrix.readTableNames();
 var
 	datagroup:hid_t;
 	info:hid_t;
@@ -727,38 +767,48 @@ var
     dataspace  :hid_t;
     t:Integer;
     tpath, tname: String;
+    ptpath:PChar;
+    temp_hid : hid_t;
 begin
 
     dims[0] := _nRows;
     dims[1] := _nCols;
 
     fillvalue[0] := 0.0;
-    chunksize[0] := 1;
+    chunksize[0] := 5; // a few rows at a time, instead of just one
     chunksize[1] := _nCols;
+    //if (_nCols > 5000) then begin
+    //   chunksize[1] := 4000;
+    //end else begin
+    //   chunksize[1] := _nCols;
+    //end;
 
-    dataspace := H5.H5Screate_simple(2,dims, Phsize_t(0));
+    dataspace := H5.H5Screate_simple(2,dims, nil);
 
     // Use a row-chunked, zip-compressed data format:
     plist := H5.H5Pcreate(H5.H5P_DATASET_CREATE);
     rtn := H5.H5Pset_chunk(plist, 2, chunksize);
-    rtn := H5.H5Pset_deflate(plist, 7);
-    rtn := H5.H5Pset_fill_value(plist, H5.H5T_NATIVE_DOUBLE, @fillvalue);
+    rtn := H5.H5Pset_deflate(plist, 1);
+    rtn := H5.H5Pset_fill_value(plist, _std_dtype, @(fillvalue[0]));
 
     // Loop on all tables
     for t := 0 to Length(tableNames)-1 do begin
         tpath := '/data/' + tableNames[t];
         tname := tableNames[t];
-        
+        ptpath:= PChar(tpath);
+
         // Create a dataset for each table
-        _dataset[tname] := H5.H5Dcreate2(_h5file, PChar(tpath), H5.H5T_NATIVE_DOUBLE,
-                                 dataspace, H5P_DEFAULT, plist, H5P_DEFAULT);
-        if (_dataset[tname]<0) then begin
+        temp_hid := H5.H5Dcreate2(_h5file, ptpath, _std_dtype,
+                                  dataspace, H5P_DEFAULT, plist, H5P_DEFAULT);
+        if (temp_hid<0) then begin
             writeln(stderr, 'Error creating dataset ',tpath);
             exit;
         end;
-        
+        _dataset[tname] := temp_hid;
+
         // Save the something somewhere
         _tableLookup[tname] := t+1;
+        _tableName[t+1] := tname
     end;
 
     rtn := H5.H5Pclose(plist);
@@ -799,4 +849,5 @@ end;
 begin
   h5 := THDF5Dll.Create('hdf5.dll');
 end.
+
 
